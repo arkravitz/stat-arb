@@ -334,3 +334,302 @@ def run_single_candidate(
     print(f"Saved attribution daily file to {attribution_daily_path}")
 
 
+def run_walk_forward(
+    candidates: list[CandidateBasket],
+    panel: pd.DataFrame,
+    output_dir: Path,
+    strategy: str,
+    mean_reversion_config: MeanReversionConfig,
+    residual_config: ResidualStrategyConfig,
+    walk_forward_config: WalkForwardConfig,
+    event_calendar: pd.DataFrame | None,
+    blackout_days_before: int,
+    blackout_days_after: int,
+    catalyst_days_after: int,
+    require_catalyst: bool,
+) -> None:
+    result = _compute_walk_forward_result(
+        candidates=candidates,
+        panel=panel,
+        strategy=strategy,
+        mean_reversion_config=mean_reversion_config,
+        residual_config=residual_config,
+        walk_forward_config=walk_forward_config,
+        event_calendar=event_calendar,
+        blackout_days_before=blackout_days_before,
+        blackout_days_after=blackout_days_after,
+        catalyst_days_after=catalyst_days_after,
+        require_catalyst=require_catalyst,
+    )
+
+    timeseries_path = output_dir / "walk_forward_timeseries.csv"
+    stats_path = output_dir / "walk_forward_stats.csv"
+    folds_path = output_dir / "walk_forward_folds.csv"
+    report_path = output_dir / "walk_forward_report.html"
+    attribution_path = output_dir / "walk_forward_selection_attribution.csv"
+
+    result.timeseries.to_csv(timeseries_path)
+    result.stats.to_frame("value").to_csv(stats_path)
+    result.fold_summary.to_csv(folds_path, index=False)
+    write_walk_forward_attribution_file(result.fold_summary, attribution_path)
+    write_walk_forward_report(
+        result.timeseries,
+        result.fold_summary,
+        result.stats,
+        report_path,
+        title=f"Walk-Forward {strategy.replace('_', ' ').title()} Strategy",
+    )
+
+    print("\nWalk-forward stats:")
+    print(result.stats)
+    print(f"\nSaved walk-forward timeseries to {timeseries_path}")
+    print(f"Saved walk-forward stats to {stats_path}")
+    print(f"Saved walk-forward fold summary to {folds_path}")
+    print(f"Saved walk-forward selection attribution to {attribution_path}")
+    print(f"Saved walk-forward report to {report_path}")
+
+
+def _compute_walk_forward_result(
+    candidates: list[CandidateBasket],
+    panel: pd.DataFrame,
+    strategy: str,
+    mean_reversion_config: MeanReversionConfig,
+    residual_config: ResidualStrategyConfig,
+    walk_forward_config: WalkForwardConfig,
+    event_calendar: pd.DataFrame | None,
+    blackout_days_before: int,
+    blackout_days_after: int,
+    catalyst_days_after: int,
+    require_catalyst: bool,
+):
+    warmup_bars = (
+        max(mean_reversion_config.lookback, 5)
+        if strategy == "mean_reversion"
+        else max(residual_config.signal_lookback, residual_config.beta_lookback, 5)
+    )
+
+    def runner(history: pd.DataFrame, candidate: CandidateBasket):
+        return _build_result_from_panel(
+            panel=history,
+            candidate=candidate,
+            strategy=strategy,
+            mean_reversion_config=mean_reversion_config,
+            residual_config=residual_config,
+            event_calendar=event_calendar,
+            blackout_days_before=blackout_days_before,
+            blackout_days_after=blackout_days_after,
+            catalyst_days_after=catalyst_days_after,
+            require_catalyst=require_catalyst,
+        )
+
+    return run_walk_forward_selection(
+        prices=panel,
+        candidates=candidates,
+        config=walk_forward_config,
+        runner=runner,
+        warmup_bars=warmup_bars,
+    )
+
+
+def run_residual_mode_comparison(
+    candidates: list[CandidateBasket],
+    panel: pd.DataFrame,
+    output_dir: Path,
+    residual_config: ResidualStrategyConfig,
+    walk_forward_config: WalkForwardConfig,
+    event_calendar: pd.DataFrame | None,
+    blackout_days_before: int,
+    blackout_days_after: int,
+    catalyst_days_after: int,
+    require_catalyst: bool,
+) -> None:
+    results = {}
+    for strategy in ["residual", "residual_momentum"]:
+        strategy_dir = output_dir / strategy
+        strategy_dir.mkdir(parents=True, exist_ok=True)
+        result = _compute_walk_forward_result(
+            candidates=candidates,
+            panel=panel,
+            strategy=strategy,
+            mean_reversion_config=MeanReversionConfig(),
+            residual_config=residual_config,
+            walk_forward_config=walk_forward_config,
+            event_calendar=event_calendar,
+            blackout_days_before=blackout_days_before,
+            blackout_days_after=blackout_days_after,
+            catalyst_days_after=catalyst_days_after,
+            require_catalyst=require_catalyst,
+        )
+        result.timeseries.to_csv(strategy_dir / "walk_forward_timeseries.csv")
+        result.stats.to_frame("value").to_csv(strategy_dir / "walk_forward_stats.csv")
+        result.fold_summary.to_csv(strategy_dir / "walk_forward_folds.csv", index=False)
+        results[strategy] = result.stats
+
+    comparison = pd.DataFrame(results)
+    comparison_path = output_dir / "residual_mode_comparison.csv"
+    comparison.to_csv(comparison_path)
+    print("\nResidual mode comparison:")
+    print(comparison)
+    print(f"\nSaved residual mode comparison to {comparison_path}")
+
+
+def main() -> None:
+    args = parse_args()
+    if not args.basket and not args.csv:
+        raise SystemExit("Provide either --basket or --csv")
+
+    cache_dirs = resolve_cache_dirs(args.cache_dir)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    factor_symbols = resolve_factor_symbols(args.factor_symbols, args.factor_preset)
+
+    mean_reversion_config = MeanReversionConfig(
+        entry_z=args.entry_z,
+        exit_z=args.exit_z,
+        lookback=args.lookback,
+    )
+    residual_config = ResidualStrategyConfig(
+        factor_symbols=tuple(factor_symbols),
+        entry_z=args.entry_z,
+        exit_z=args.exit_z,
+        signal_lookback=args.lookback,
+        beta_lookback=args.beta_lookback,
+        hedge_rebalance=args.hedge_rebalance,
+        target_vol=args.target_vol,
+        vol_lookback=args.vol_lookback,
+        max_gross_leverage=args.max_gross_leverage,
+        max_residual_vol=args.max_residual_vol,
+        beta_stability_lookback=args.beta_stability_lookback,
+        max_beta_instability=args.max_beta_instability,
+        max_factor_vol=args.max_factor_vol,
+        transaction_cost_bps=args.transaction_cost_bps,
+        borrow_cost_bps=args.borrow_cost_bps,
+    )
+    event_calendar = (
+        load_event_calendar(Path(args.events_csv)) if args.events_csv else None
+    )
+
+    candidates = (
+        load_candidate_baskets(Path(args.csv))
+        if args.csv
+        else [_candidate_from_basket_text(args.basket)]
+    )
+    panel = _load_master_panel(
+        candidates=candidates,
+        cache_dirs=cache_dirs,
+        start=args.start,
+        end=args.end,
+        factor_symbols=factor_symbols
+        if args.strategy in {"residual", "residual_momentum"}
+        else [],
+    )
+
+    if args.compare_residual_modes:
+        walk_forward_config = WalkForwardConfig(
+            train_days=args.train_days,
+            validate_days=args.validate_days,
+            test_days=args.test_days,
+            top_k=args.top_k,
+            min_train_sharpe=args.min_train_sharpe,
+            min_validation_sharpe=args.min_validation_sharpe,
+            min_validation_entries=args.min_validation_entries,
+            stability_penalty=args.stability_penalty,
+            max_symbol_overlap=args.max_symbol_overlap,
+            max_validation_correlation=args.max_validation_correlation,
+        )
+        run_residual_mode_comparison(
+            candidates=candidates,
+            panel=panel,
+            output_dir=output_dir,
+            residual_config=residual_config,
+            walk_forward_config=walk_forward_config,
+            event_calendar=event_calendar,
+            blackout_days_before=args.blackout_days_before,
+            blackout_days_after=args.blackout_days_after,
+            catalyst_days_after=args.catalyst_days_after,
+            require_catalyst=args.require_catalyst,
+        )
+        return
+
+    if args.walk_forward:
+        walk_forward_config = WalkForwardConfig(
+            train_days=args.train_days,
+            validate_days=args.validate_days,
+            test_days=args.test_days,
+            top_k=args.top_k,
+            min_train_sharpe=args.min_train_sharpe,
+            min_validation_sharpe=args.min_validation_sharpe,
+            min_validation_entries=args.min_validation_entries,
+            stability_penalty=args.stability_penalty,
+            max_symbol_overlap=args.max_symbol_overlap,
+            max_validation_correlation=args.max_validation_correlation,
+        )
+        run_walk_forward(
+            candidates=candidates,
+            panel=panel,
+            output_dir=output_dir,
+            strategy=args.strategy,
+            mean_reversion_config=mean_reversion_config,
+            residual_config=residual_config,
+            walk_forward_config=walk_forward_config,
+            event_calendar=event_calendar,
+            blackout_days_before=args.blackout_days_before,
+            blackout_days_after=args.blackout_days_after,
+            catalyst_days_after=args.catalyst_days_after,
+            require_catalyst=args.require_catalyst,
+        )
+        return
+
+    if not args.csv:
+        run_single_candidate(
+            candidate=candidates[0],
+            panel=panel,
+            output_dir=output_dir,
+            strategy=args.strategy,
+            mean_reversion_config=mean_reversion_config,
+            residual_config=residual_config,
+            event_calendar=event_calendar,
+            blackout_days_before=args.blackout_days_before,
+            blackout_days_after=args.blackout_days_after,
+            catalyst_days_after=args.catalyst_days_after,
+            require_catalyst=args.require_catalyst,
+        )
+        return
+
+    summary = run_batch_from_candidates(
+        candidates=candidates,
+        panel=panel,
+        output_dir=output_dir,
+        strategy=args.strategy,
+        mean_reversion_config=mean_reversion_config,
+        residual_config=residual_config,
+        event_calendar=event_calendar,
+        blackout_days_before=args.blackout_days_before,
+        blackout_days_after=args.blackout_days_after,
+        catalyst_days_after=args.catalyst_days_after,
+        require_catalyst=args.require_catalyst,
+    )
+    print("\nSaved batch summary to:", output_dir / "all_bucket_backtest_stats.csv")
+    print(
+        "Saved interactive dashboard to:", output_dir / "batch_backtest_dashboard.html"
+    )
+    cols = [
+        column
+        for column in [
+            "trade",
+            "strategy",
+            "annual_return",
+            "annual_vol",
+            "sharpe",
+            "max_drawdown",
+            "entries",
+            "active_fraction",
+            "report_path",
+        ]
+        if column in summary.columns
+    ]
+    print(summary[cols])
+
+
+if __name__ == "__main__":
+    main()
