@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stat-arb"
+version = "0.1.0"
+description = "Research utilities for discovering and backtesting statistical arbitrage baskets."
+requires-python = ">=3.10"
+dependencies = [
+  "matplotlib>=3.8",
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "plotly>=6.0",
+  "pyarrow>=16.0",
+  "requests>=2.31",
+  "scikit-learn>=1.4",
+  "scipy>=1.12",
+  "statsmodels>=0.14",
+  "torch>=2.2",
+  "tqdm>=4.66",
+  "yfinance>=0.2.40",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.setuptools.packages.find]
+include = ["stat_arb*"]
