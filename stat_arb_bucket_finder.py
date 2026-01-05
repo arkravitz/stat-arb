@@ -549,3 +549,488 @@ def _set_seed(seed: int) -> None:
     torch.manual_seed(seed)
 
 
+def train_asset_encoder(
+    feature_tensor: np.ndarray,
+    symbols: Sequence[str],
+    config: EmbeddingTrainingConfig,
+    device: str = "cpu",
+) -> Tuple[Encoder, np.ndarray]:
+    _set_seed(config.seed)
+
+    print("Tensor finite:", np.isfinite(feature_tensor).all())
+    print("Tensor nan count:", int(np.isnan(feature_tensor).sum()))
+    print("Tensor inf count:", int(np.isinf(feature_tensor).sum()))
+
+    num_samples, num_assets, num_features = feature_tensor.shape
+    X = feature_tensor.reshape(num_samples * num_assets, num_features)
+    y = np.tile(np.arange(num_assets), num_samples)
+
+    scaler = StandardScaler()
+    X = scaler.fit_transform(X)
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+
+    if not np.isfinite(X).all():
+        raise ValueError("Non-finite values remain in scaled feature matrix X")
+
+    print("Feature matrix stats:")
+    print("  shape:", X.shape)
+    print("  finite:", np.isfinite(X).all())
+    print("  min:", float(np.nanmin(X)))
+    print("  max:", float(np.nanmax(X)))
+
+    X_t = torch.tensor(X, dtype=torch.float32, device=device)
+    y_t = torch.tensor(y, dtype=torch.long, device=device)
+
+    encoder = Encoder(
+        num_features, emb_dim=config.emb_dim, hidden_dim=config.hidden_dim
+    ).to(device)
+    arc = ArcMarginProduct(config.emb_dim, num_assets).to(device)
+
+    params = list(encoder.parameters()) + list(arc.parameters())
+    opt = torch.optim.Adam(params, lr=config.lr)
+
+    idx = np.arange(len(X))
+    for epoch in range(config.epochs):
+        np.random.shuffle(idx)
+        total_loss = 0.0
+        for i in range(0, len(idx), config.batch_size):
+            batch = idx[i : i + config.batch_size]
+            xb = X_t[batch]
+            yb = y_t[batch]
+
+            z = encoder(xb)
+            logits = arc(z, yb)
+            loss = F.cross_entropy(logits, yb)
+
+            if not torch.isfinite(loss):
+                raise ValueError(f"Non-finite loss encountered at epoch {epoch + 1}")
+
+            opt.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
+            opt.step()
+            total_loss += float(loss.item()) * len(batch)
+
+        avg_loss = total_loss / len(idx)
+        print(f"Epoch {epoch + 1}/{config.epochs}  loss={avg_loss:.4f}")
+
+    with torch.no_grad():
+        Z = encoder(X_t).cpu().numpy().reshape(num_samples, num_assets, config.emb_dim)
+
+    asset_embeddings = Z.mean(axis=0)
+    asset_embeddings = np.nan_to_num(asset_embeddings, nan=0.0, posinf=0.0, neginf=0.0)
+    asset_embeddings /= np.linalg.norm(asset_embeddings, axis=1, keepdims=True) + 1e-12
+
+    return encoder, asset_embeddings
+
+
+# -----------------------------------------------------------------------------
+# Bucket generation
+# -----------------------------------------------------------------------------
+
+
+def propose_candidate_buckets(
+    asset_embeddings: np.ndarray,
+    symbols: Sequence[str],
+    bucket_sizes: Sequence[int],
+    top_k_neighbors: int = 8,
+    max_candidates_per_anchor: int = 40,
+) -> List[Tuple[str, ...]]:
+    neigh = NearestNeighbors(
+        n_neighbors=min(top_k_neighbors + 1, len(symbols)), metric="cosine"
+    )
+    neigh.fit(asset_embeddings)
+    _, indices = neigh.kneighbors(asset_embeddings)
+
+    all_candidates = set()
+
+    for anchor_ix, nbrs in enumerate(indices):
+        pool = [
+            i
+            for i in nbrs
+            if i != anchor_ix
+            and _economic_similarity(symbols[anchor_ix], symbols[i]) >= 2
+        ]
+        for bucket_size in bucket_sizes:
+            if bucket_size < 2:
+                continue
+            needed = bucket_size - 1
+            combos = itertools.islice(
+                itertools.combinations(pool, needed), max_candidates_per_anchor
+            )
+            for combo in combos:
+                bucket = tuple(
+                    sorted([symbols[anchor_ix], *[symbols[i] for i in combo]])
+                )
+                if _bucket_passes_constraints(bucket):
+                    all_candidates.add(bucket)
+
+    return sorted(all_candidates)
+
+
+# -----------------------------------------------------------------------------
+# Spread fitting and scoring
+# -----------------------------------------------------------------------------
+
+
+@dataclass
+class BucketScore:
+    symbols: Tuple[str, ...]
+    weights: Dict[str, float]
+    economic_cluster: str
+    adf_stat: float
+    adf_pvalue: float
+    half_life: float
+    spread_std: float
+    zscore_abs_latest: float
+    turnover_proxy: float
+    composite_score: float
+    trade_direction: str
+
+
+def estimate_half_life(spread: pd.Series) -> float:
+    spread = spread.dropna()
+    if len(spread) < 10:
+        return float("inf")
+    lagged = spread.shift(1).dropna()
+    delta = spread.diff().dropna()
+    aligned = pd.concat([lagged, delta], axis=1).dropna()
+    if aligned.empty:
+        return float("inf")
+    x = aligned.iloc[:, 0].values
+    y = aligned.iloc[:, 1].values
+    beta = np.polyfit(x, y, 1)[0]
+    if beta >= 0:
+        return float("inf")
+    return max(1.0, -np.log(2) / beta)
+
+
+def fit_mean_reverting_weights(log_prices: pd.DataFrame) -> np.ndarray:
+    """
+    Find weights that minimize spread autoregression persistence.
+    Constraint: L1 norm ~= 1 and sum(weights) ~= 0 via penalties.
+    """
+
+    X = log_prices.values
+    n = X.shape[1]
+
+    def objective(w: np.ndarray) -> float:
+        spread = X @ w
+        if np.std(spread) < 1e-8:
+            return 1e6
+        s = pd.Series(spread)
+        hl = estimate_half_life(s)
+        sum_penalty = 20.0 * abs(np.sum(w))
+        l1_penalty = 5.0 * abs(np.sum(np.abs(w)) - 1.0)
+        return hl + sum_penalty + l1_penalty
+
+    w0 = np.random.randn(n)
+    w0 -= w0.mean()
+    w0 /= np.sum(np.abs(w0)) + 1e-12
+
+    res = minimize(objective, w0, method="L-BFGS-B")
+    w = res.x
+    w /= np.sum(np.abs(w)) + 1e-12
+    return w
+
+
+def score_bucket(prices: pd.DataFrame, bucket: Tuple[str, ...]) -> BucketScore | None:
+    df = prices[list(bucket)].dropna()
+    if len(df) < 120:
+        return None
+
+    logp = _safe_log_prices(df)
+    w = fit_mean_reverting_weights(logp)
+    spread = pd.Series(logp.values @ w, index=logp.index, name="spread")
+
+    if spread.std() < 1e-8:
+        return None
+
+    try:
+        adf_stat, adf_pvalue, *_ = adfuller(spread.dropna(), autolag="AIC")
+    except Exception:
+        adf_stat, adf_pvalue = np.nan, 1.0
+
+    half_life = estimate_half_life(spread)
+    spread_std = float(spread.std())
+
+    rolling_mean = spread.rolling(60).mean()
+    rolling_std = spread.rolling(60).std()
+    z = (
+        ((spread - rolling_mean) / rolling_std)
+        .replace([np.inf, -np.inf], np.nan)
+        .dropna()
+    )
+    if z.empty:
+        return None
+
+    z_latest = float(z.iloc[-1])
+    turnover_proxy = float(np.sum(np.abs(np.diff(w))))
+
+    composite = (
+        -2.0 * adf_pvalue
+        - 0.02 * min(half_life, 250.0)
+        + 0.30 * abs(z_latest)
+        - 0.10 * turnover_proxy
+        - 0.10 * spread_std
+    )
+
+    weight_map = {sym: float(weight) for sym, weight in zip(bucket, w)}
+
+    if z_latest > 0:
+        direction = "short spread"
+    else:
+        direction = "long spread"
+
+    return BucketScore(
+        symbols=bucket,
+        weights=weight_map,
+        economic_cluster=_bucket_cluster(bucket),
+        adf_stat=float(adf_stat) if not math.isnan(adf_stat) else 0.0,
+        adf_pvalue=float(adf_pvalue),
+        half_life=float(half_life),
+        spread_std=spread_std,
+        zscore_abs_latest=float(abs(z_latest)),
+        turnover_proxy=turnover_proxy,
+        composite_score=float(composite),
+        trade_direction=direction,
+    )
+
+
+# -----------------------------------------------------------------------------
+# Trade generation
+# -----------------------------------------------------------------------------
+
+
+def integerize_trade(
+    weights: Dict[str, float], gross_units: int = 10
+) -> Dict[str, int]:
+    raw = {k: v * gross_units for k, v in weights.items()}
+    ints = {k: int(np.round(v)) for k, v in raw.items()}
+
+    if all(v == 0 for v in ints.values()):
+        biggest = max(raw, key=lambda k: abs(raw[k]))
+        ints[biggest] = 1 if raw[biggest] > 0 else -1
+    return ints
+
+
+def render_trade(score: BucketScore, gross_units: int = 10) -> str:
+    ints = integerize_trade(score.weights, gross_units=gross_units)
+
+    if score.trade_direction == "short spread":
+        signed = {k: -v for k, v in ints.items()}
+    else:
+        signed = ints
+
+    parts = []
+    for sym, qty in signed.items():
+        if qty > 0:
+            parts.append(f"long {qty} units of {sym}")
+        elif qty < 0:
+            parts.append(f"short {abs(qty)} units of {sym}")
+
+    return ", ".join(parts)
+
+
+# -----------------------------------------------------------------------------
+# Main orchestration
+# -----------------------------------------------------------------------------
+
+
+def resolve_symbols(args: argparse.Namespace) -> List[str]:
+    if args.universe_preset:
+        if args.universe_preset not in UNIVERSE_PRESETS:
+            raise ValueError(
+                f"Unknown --universe-preset={args.universe_preset}. "
+                f"Available: {sorted(UNIVERSE_PRESETS)}"
+            )
+        return UNIVERSE_PRESETS[args.universe_preset]
+    if not args.symbols:
+        raise ValueError("Provide --symbols or --universe-preset")
+    return args.symbols
+
+
+def save_llm_review_prompt(results: pd.DataFrame, path: str) -> str:
+    candidate_records = []
+    if not results.empty:
+        for _, row in results.iterrows():
+            candidate_records.append(
+                {
+                    "symbols": row["symbols"],
+                    "weights": row["weights"],
+                    "trade": row["trade"],
+                    "adf_pvalue": row["adf_pvalue"],
+                    "half_life": row["half_life"],
+                    "composite_score": row["composite_score"],
+                }
+            )
+
+    prompt = LLM_REVIEW_PROMPT_TEMPLATE.format(
+        candidate_json=json.dumps(candidate_records, indent=2)
+    )
+    with open(path, "w") as f:
+        f.write(prompt)
+    return prompt
+
+
+def run_pipeline(args: argparse.Namespace) -> pd.DataFrame:
+    symbols = resolve_symbols(args)
+    print(f"Using symbols: {symbols}")
+
+    prices = load_price_panel(
+        symbols=symbols,
+        provider=args.provider,
+        api_key=args.api_key,
+        csv_folder=args.csv_folder,
+        start=args.start,
+        end=args.end,
+        cache_dir=args.cache_dir,
+        force_refresh=args.force_refresh,
+    )
+    print(f"Loaded prices shape: {prices.shape}")
+
+    feature_tensor, timestamps, symbols = make_asset_feature_tensor(
+        prices,
+        lookback=args.lookback,
+        vol_lookback=args.vol_lookback,
+    )
+    print(f"Feature tensor shape: {feature_tensor.shape}")
+
+    _, asset_embeddings = train_asset_encoder(
+        feature_tensor,
+        symbols,
+        EmbeddingTrainingConfig(
+            epochs=args.epochs,
+            lr=args.lr,
+            batch_size=args.batch_size,
+            emb_dim=args.emb_dim,
+            hidden_dim=args.hidden_dim,
+            seed=args.seed,
+        ),
+        device=args.device,
+    )
+
+    if not np.isfinite(asset_embeddings).all():
+        raise ValueError(
+            "asset_embeddings contains NaN/Inf before nearest-neighbor search"
+        )
+
+    candidates = propose_candidate_buckets(
+        asset_embeddings,
+        symbols,
+        bucket_sizes=args.bucket_sizes,
+        top_k_neighbors=args.top_k_neighbors,
+        max_candidates_per_anchor=args.max_candidates_per_anchor,
+    )
+    print(f"Generated {len(candidates)} candidate buckets")
+
+    scores: List[BucketScore] = []
+    for bucket in tqdm(candidates, desc="Scoring buckets"):
+        score = score_bucket(prices, bucket)
+        if score is not None:
+            scores.append(score)
+
+    scores.sort(key=lambda x: x.composite_score, reverse=True)
+    top_scores = scores[: args.top_buckets]
+
+    rows = []
+    for s in top_scores:
+        row = asdict(s)
+        row["trade"] = render_trade(s, gross_units=args.gross_units)
+        rows.append(row)
+
+    results = pd.DataFrame(rows)
+    results.to_csv(args.output_csv, index=False)
+
+    with open(args.output_json, "w") as f:
+        json.dump(rows, f, indent=2)
+
+    llm_prompt = save_llm_review_prompt(results, args.output_prompt)
+
+    print("\nTop candidate trades:\n")
+    if not results.empty:
+        cols = ["symbols", "composite_score", "adf_pvalue", "half_life", "trade"]
+        print(results[cols].to_string(index=False))
+    else:
+        print("No buckets survived scoring.")
+
+    print(f"\nSaved LLM review prompt to: {args.output_prompt}\n")
+    if args.print_prompt:
+        print("=" * 80)
+        print(llm_prompt)
+        print("=" * 80)
+
+    return results
+
+
+# -----------------------------------------------------------------------------
+# LLM review helper prompt
+# -----------------------------------------------------------------------------
+
+
+LLM_REVIEW_PROMPT_TEMPLATE = """
+You are reviewing candidate statistical-arbitrage baskets.
+
+Goal:
+For each basket, judge whether the grouped assets make intuitive economic or market-structure sense as a tradable relationship.
+
+Rules:
+- Do NOT judge based on recent price action alone.
+- Focus on whether the assets plausibly share drivers such as sector, supply chain, commodity linkage, rate sensitivity, crypto beta, ETF membership, or substitution/complementarity.
+- Mark a basket as:
+  - STRONG_INTUITION
+  - PLAUSIBLE_BUT_WEAK
+  - NO_CLEAR_INTUITION
+- Give 1-3 sentences of reasoning.
+
+Candidate baskets:
+{candidate_json}
+""".strip()
+
+
+# -----------------------------------------------------------------------------
+# CLI
+# -----------------------------------------------------------------------------
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+    p.add_argument("--symbols", nargs="+", default=None)
+    p.add_argument(
+        "--universe-preset", choices=sorted(UNIVERSE_PRESETS), default="semis_fast"
+    )
+    p.add_argument(
+        "--provider",
+        choices=["yfinance", "finnhub", "alpha_vantage", "csv"],
+        default="yfinance",
+    )
+    p.add_argument("--api-key", default=None)
+    p.add_argument("--csv-folder", default=None)
+    p.add_argument("--cache-dir", default="price_cache")
+    p.add_argument("--force-refresh", action="store_true")
+    p.add_argument("--start", default="2022-01-01")
+    p.add_argument("--end", default="2026-01-01")
+    p.add_argument("--lookback", type=int, default=60)
+    p.add_argument("--vol-lookback", type=int, default=20)
+    p.add_argument("--epochs", type=int, default=20)
+    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--batch-size", type=int, default=512)
+    p.add_argument("--emb-dim", type=int, default=32)
+    p.add_argument("--hidden-dim", type=int, default=128)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--device", default="cpu")
+    p.add_argument("--bucket-sizes", nargs="+", type=int, default=[3, 4])
+    p.add_argument("--top-k-neighbors", type=int, default=8)
+    p.add_argument("--max-candidates-per-anchor", type=int, default=40)
+    p.add_argument("--top-buckets", type=int, default=25)
+    p.add_argument("--gross-units", type=int, default=10)
+    p.add_argument("--output-csv", default="stat_arb_buckets.csv")
+    p.add_argument("--output-json", default="stat_arb_buckets.json")
+    p.add_argument("--output-prompt", default="stat_arb_buckets_llm_prompt.txt")
+    p.add_argument("--print-prompt", action="store_true")
+    return p.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    run_pipeline(args)
