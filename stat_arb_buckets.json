@@ -1,0 +1,230 @@
+[
+  {
+    "symbols": [
+      "AVGO",
+      "QCOM",
+      "SMH",
+      "SOXX"
+    ],
+    "weights": {
+      "AVGO": 0.12120534763597099,
+      "QCOM": 0.08193065659008109,
+      "SMH": -0.46664292346126485,
+      "SOXX": 0.330221072311683
+    },
+    "adf_stat": -4.883213903508724,
+    "adf_pvalue": 3.759530094350941e-05,
+    "half_life": 13.576585809193409,
+    "spread_std": 0.009721453510585362,
+    "zscore_abs_latest": 1.4828262672841521,
+    "turnover_proxy": 1.3847122668701837,
+    "composite_score": 0.03379760136141351,
+    "trade_direction": "long spread",
+    "trade": "long 1 units of AVGO, long 1 units of QCOM, short 5 units of SMH, long 3 units of SOXX"
+  },
+  {
+    "symbols": [
+      "AMD",
+      "AVGO",
+      "QCOM",
+      "SMH"
+    ],
+    "weights": {
+      "AMD": 0.11410757581352136,
+      "AVGO": 0.21313671260936012,
+      "QCOM": 0.17275570841903806,
+      "SMH": -0.5000000031570805
+    },
+    "adf_stat": -3.6895321585257665,
+    "adf_pvalue": 0.004262826288172195,
+    "half_life": 25.72336862535359,
+    "spread_std": 0.018597592334032367,
+    "zscore_abs_latest": 2.0595700293694525,
+    "turnover_proxy": 0.8121658525622795,
+    "composite_score": 0.011801639237788326,
+    "trade_direction": "long spread",
+    "trade": "long 1 units of AMD, long 2 units of AVGO, long 2 units of QCOM, short 5 units of SMH"
+  },
+  {
+    "symbols": [
+      "AMD",
+      "AVGO",
+      "INTC",
+      "SMH"
+    ],
+    "weights": {
+      "AMD": 0.2890577517346858,
+      "AVGO": 0.1295654064714074,
+      "INTC": -0.13441903983771877,
+      "SMH": -0.446957801955188
+    },
+    "adf_stat": -4.525345744939879,
+    "adf_pvalue": 0.00017691171260212645,
+    "half_life": 17.08789076394441,
+    "spread_std": 0.02548165542653506,
+    "zscore_abs_latest": 1.273737556935866,
+    "turnover_proxy": 0.7360155536898738,
+    "composite_score": -0.03614009253497356,
+    "trade_direction": "long spread",
+    "trade": "long 3 units of AMD, long 1 units of AVGO, short 1 units of INTC, short 4 units of SMH"
+  },
+  {
+    "symbols": [
+      "AMD",
+      "AVGO",
+      "INTC",
+      "SOXX"
+    ],
+    "weights": {
+      "AMD": 0.3182587425276728,
+      "AVGO": 0.06795573705404734,
+      "INTC": -0.10519194654222526,
+      "SOXX": -0.5085935738750548
+    },
+    "adf_stat": -4.747065553271999,
+    "adf_pvalue": 6.85914318690456e-05,
+    "half_life": 15.66392453662637,
+    "spread_std": 0.026388176358667272,
+    "zscore_abs_latest": 1.0295147831944278,
+    "turnover_proxy": 0.8268523164027275,
+    "composite_score": -0.08988528791407664,
+    "trade_direction": "long spread",
+    "trade": "long 3 units of AMD, long 1 units of AVGO, short 1 units of INTC, short 5 units of SOXX"
+  },
+  {
+    "symbols": [
+      "AMD",
+      "AVGO",
+      "NVDA",
+      "SOXX"
+    ],
+    "weights": {
+      "AMD": -0.21294544599571213,
+      "AVGO": -0.04546666122321019,
+      "NVDA": -0.09963218010165105,
+      "SOXX": 0.6419557124340425
+    },
+    "adf_stat": -4.77040225866388,
+    "adf_pvalue": 6.19379391489538e-05,
+    "half_life": 15.548874513222206,
+    "spread_std": 0.023798813393816048,
+    "zscore_abs_latest": 1.023505035674457,
+    "turnover_proxy": 0.9632321961866364,
+    "composite_score": -0.10275295639845017,
+    "trade_direction": "short spread",
+    "trade": "long 2 units of AMD, long 1 units of NVDA, short 6 units of SOXX"
+  },
+  {
+    "symbols": [
+      "AMD",
+      "NVDA",
+      "QCOM",
+      "SOXX"
+    ],
+    "weights": {
+      "AMD": 0.2074285074664987,
+      "NVDA": 0.13272475930928307,
+      "QCOM": 0.015225113336745477,
+      "SOXX": -0.6446216195591843
+    },
+    "adf_stat": -4.545726709907185,
+    "adf_pvalue": 0.00016242968176289157,
+    "half_life": 16.497863652014118,
+    "spread_std": 0.024733519614971864,
+    "zscore_abs_latest": 0.9129584778556443,
+    "turnover_proxy": 0.8520501270256831,
+    "composite_score": -0.14407295371118037,
+    "trade_direction": "long spread",
+    "trade": "long 2 units of AMD, long 1 units of NVDA, short 6 units of SOXX"
+  },
+  {
+    "symbols": [
+      "AMD",
+      "NVDA",
+      "SOXX"
+    ],
+    "weights": {
+      "AMD": -0.21158565534759552,
+      "NVDA": -0.13634165652145336,
+      "SOXX": 0.6520726878947778
+    },
+    "adf_stat": -4.337540758891479,
+    "adf_pvalue": 0.0003822180942842844,
+    "half_life": 16.557259340257122,
+    "spread_std": 0.025901457240217297,
+    "zscore_abs_latest": 0.903563897187734,
+    "turnover_proxy": 0.8636583432423733,
+    "composite_score": -0.1497964338856499,
+    "trade_direction": "short spread",
+    "trade": "long 2 units of AMD, long 1 units of NVDA, short 7 units of SOXX"
+  },
+  {
+    "symbols": [
+      "AMD",
+      "AVGO",
+      "QCOM",
+      "SOXX"
+    ],
+    "weights": {
+      "AMD": -0.21860204224789456,
+      "AVGO": -0.14005686671161532,
+      "QCOM": -0.05666331316654044,
+      "SOXX": 0.5846777778729496
+    },
+    "adf_stat": -3.845176545332485,
+    "adf_pvalue": 0.0024774858081273755,
+    "half_life": 24.057836895302295,
+    "spread_std": 0.022937181533652058,
+    "zscore_abs_latest": 1.3881304041332272,
+    "turnover_proxy": 0.8032798201208442,
+    "composite_score": -0.15229428844778214,
+    "trade_direction": "short spread",
+    "trade": "long 2 units of AMD, long 1 units of AVGO, long 1 units of QCOM, short 6 units of SOXX"
+  },
+  {
+    "symbols": [
+      "AVGO",
+      "INTC",
+      "SMH",
+      "SOXX"
+    ],
+    "weights": {
+      "AVGO": 0.07389760834348925,
+      "INTC": -0.03393220781612391,
+      "SMH": -0.4458538345453035,
+      "SOXX": 0.44631634929408337
+    },
+    "adf_stat": -4.268217915229904,
+    "adf_pvalue": 0.0005040021050526036,
+    "half_life": 16.92179003800271,
+    "spread_std": 0.008585587791285503,
+    "zscore_abs_latest": 1.0618083375509269,
+    "turnover_proxy": 1.4119216267281796,
+    "composite_score": -0.1629520251568279,
+    "trade_direction": "long spread",
+    "trade": "long 1 units of AVGO, short 4 units of SMH, long 4 units of SOXX"
+  },
+  {
+    "symbols": [
+      "AMD",
+      "AVGO",
+      "NVDA",
+      "SMH"
+    ],
+    "weights": {
+      "AMD": 0.1451242357125879,
+      "AVGO": 0.17956025004679882,
+      "NVDA": 0.08284084327731818,
+      "SMH": -0.5924746709622951
+    },
+    "adf_stat": -3.578804735135,
+    "adf_pvalue": 0.006179406377019359,
+    "half_life": 28.178614244700533,
+    "spread_std": 0.022648572097287965,
+    "zscore_abs_latest": 1.6253071712572331,
+    "turnover_proxy": 0.8064709353433048,
+    "composite_score": -0.17125089701493873,
+    "trade_direction": "long spread",
+    "trade": "long 1 units of AMD, long 2 units of AVGO, long 1 units of NVDA, short 6 units of SMH"
+  }
+]

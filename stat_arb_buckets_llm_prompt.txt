@@ -1,0 +1,195 @@
+You are reviewing candidate statistical-arbitrage baskets.
+
+Goal:
+For each basket, judge whether the grouped assets make intuitive economic or market-structure sense as a tradable relationship.
+
+Rules:
+- Do NOT judge based on recent price action alone.
+- Focus on whether the assets plausibly share drivers such as sector, supply chain, commodity linkage, rate sensitivity, crypto beta, ETF membership, or substitution/complementarity.
+- Mark a basket as:
+  - STRONG_INTUITION
+  - PLAUSIBLE_BUT_WEAK
+  - NO_CLEAR_INTUITION
+- Give 1-3 sentences of reasoning.
+
+Candidate baskets:
+[
+  {
+    "symbols": [
+      "AVGO",
+      "QCOM",
+      "SMH",
+      "SOXX"
+    ],
+    "weights": {
+      "AVGO": 0.12120534763597099,
+      "QCOM": 0.08193065659008109,
+      "SMH": -0.46664292346126485,
+      "SOXX": 0.330221072311683
+    },
+    "trade": "long 1 units of AVGO, long 1 units of QCOM, short 5 units of SMH, long 3 units of SOXX",
+    "adf_pvalue": 3.759530094350941e-05,
+    "half_life": 13.576585809193409,
+    "composite_score": 0.03379760136141351
+  },
+  {
+    "symbols": [
+      "AMD",
+      "AVGO",
+      "QCOM",
+      "SMH"
+    ],
+    "weights": {
+      "AMD": 0.11410757581352136,
+      "AVGO": 0.21313671260936012,
+      "QCOM": 0.17275570841903806,
+      "SMH": -0.5000000031570805
+    },
+    "trade": "long 1 units of AMD, long 2 units of AVGO, long 2 units of QCOM, short 5 units of SMH",
+    "adf_pvalue": 0.004262826288172195,
+    "half_life": 25.72336862535359,
+    "composite_score": 0.011801639237788326
+  },
+  {
+    "symbols": [
+      "AMD",
+      "AVGO",
+      "INTC",
+      "SMH"
+    ],
+    "weights": {
+      "AMD": 0.2890577517346858,
+      "AVGO": 0.1295654064714074,
+      "INTC": -0.13441903983771877,
+      "SMH": -0.446957801955188
+    },
+    "trade": "long 3 units of AMD, long 1 units of AVGO, short 1 units of INTC, short 4 units of SMH",
+    "adf_pvalue": 0.00017691171260212645,
+    "half_life": 17.08789076394441,
+    "composite_score": -0.03614009253497356
+  },
+  {
+    "symbols": [
+      "AMD",
+      "AVGO",
+      "INTC",
+      "SOXX"
+    ],
+    "weights": {
+      "AMD": 0.3182587425276728,
+      "AVGO": 0.06795573705404734,
+      "INTC": -0.10519194654222526,
+      "SOXX": -0.5085935738750548
+    },
+    "trade": "long 3 units of AMD, long 1 units of AVGO, short 1 units of INTC, short 5 units of SOXX",
+    "adf_pvalue": 6.85914318690456e-05,
+    "half_life": 15.66392453662637,
+    "composite_score": -0.08988528791407664
+  },
+  {
+    "symbols": [
+      "AMD",
+      "AVGO",
+      "NVDA",
+      "SOXX"
+    ],
+    "weights": {
+      "AMD": -0.21294544599571213,
+      "AVGO": -0.04546666122321019,
+      "NVDA": -0.09963218010165105,
+      "SOXX": 0.6419557124340425
+    },
+    "trade": "long 2 units of AMD, long 1 units of NVDA, short 6 units of SOXX",
+    "adf_pvalue": 6.19379391489538e-05,
+    "half_life": 15.548874513222206,
+    "composite_score": -0.10275295639845017
+  },
+  {
+    "symbols": [
+      "AMD",
+      "NVDA",
+      "QCOM",
+      "SOXX"
+    ],
+    "weights": {
+      "AMD": 0.2074285074664987,
+      "NVDA": 0.13272475930928307,
+      "QCOM": 0.015225113336745477,
+      "SOXX": -0.6446216195591843
+    },
+    "trade": "long 2 units of AMD, long 1 units of NVDA, short 6 units of SOXX",
+    "adf_pvalue": 0.00016242968176289157,
+    "half_life": 16.497863652014118,
+    "composite_score": -0.14407295371118037
+  },
+  {
+    "symbols": [
+      "AMD",
+      "NVDA",
+      "SOXX"
+    ],
+    "weights": {
+      "AMD": -0.21158565534759552,
+      "NVDA": -0.13634165652145336,
+      "SOXX": 0.6520726878947778
+    },
+    "trade": "long 2 units of AMD, long 1 units of NVDA, short 7 units of SOXX",
+    "adf_pvalue": 0.0003822180942842844,
+    "half_life": 16.557259340257122,
+    "composite_score": -0.1497964338856499
+  },
+  {
+    "symbols": [
+      "AMD",
+      "AVGO",
+      "QCOM",
+      "SOXX"
+    ],
+    "weights": {
+      "AMD": -0.21860204224789456,
+      "AVGO": -0.14005686671161532,
+      "QCOM": -0.05666331316654044,
+      "SOXX": 0.5846777778729496
+    },
+    "trade": "long 2 units of AMD, long 1 units of AVGO, long 1 units of QCOM, short 6 units of SOXX",
+    "adf_pvalue": 0.0024774858081273755,
+    "half_life": 24.057836895302295,
+    "composite_score": -0.15229428844778214
+  },
+  {
+    "symbols": [
+      "AVGO",
+      "INTC",
+      "SMH",
+      "SOXX"
+    ],
+    "weights": {
+      "AVGO": 0.07389760834348925,
+      "INTC": -0.03393220781612391,
+      "SMH": -0.4458538345453035,
+      "SOXX": 0.44631634929408337
+    },
+    "trade": "long 1 units of AVGO, short 4 units of SMH, long 4 units of SOXX",
+    "adf_pvalue": 0.0005040021050526036,
+    "half_life": 16.92179003800271,
+    "composite_score": -0.1629520251568279
+  },
+  {
+    "symbols": [
+      "AMD",
+      "AVGO",
+      "NVDA",
+      "SMH"
+    ],
+    "weights": {
+      "AMD": 0.1451242357125879,
+      "AVGO": 0.17956025004679882,
+      "NVDA": 0.08284084327731818,
+      "SMH": -0.5924746709622951
+    },
+    "trade": "long 1 units of AMD, long 2 units of AVGO, long 1 units of NVDA, short 6 units of SMH",
+    "adf_pvalue": 0.006179406377019359,
+    "half_life": 28.178614244700533,
+    "composite_score": -0.17125089701493873
+  }
+]
