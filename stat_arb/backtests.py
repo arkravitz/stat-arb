@@ -347,3 +347,448 @@ def _rolling_factor_hedge(
     return intercept, betas
 
 
+def compute_residual_mean_reversion_strategy(
+    asset_prices: pd.DataFrame,
+    weights: dict[str, float],
+    factor_prices: pd.DataFrame,
+    config: ResidualStrategyConfig,
+    blackout_mask: pd.Series | None = None,
+    catalyst_signal: pd.Series | None = None,
+    require_catalyst: bool = False,
+    mode: Literal["mean_reversion", "momentum"] = "mean_reversion",
+) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series, pd.Series, pd.DataFrame]:
+    combined_prices = pd.concat([asset_prices, factor_prices], axis=1).dropna()
+    asset_prices = combined_prices[list(asset_prices.columns)]
+    factor_prices = combined_prices[list(factor_prices.columns)]
+    weight_vec = _normalize_weights(weights)
+
+    asset_returns = asset_prices[list(weight_vec.index)].pct_change().fillna(0.0)
+    factor_returns = factor_prices.pct_change().fillna(0.0)
+    raw_spread_returns = asset_returns.mul(weight_vec, axis=1).sum(axis=1)
+    raw_spread_returns.name = "raw_spread_returns"
+
+    hedge_intercept, factor_betas = _rolling_factor_hedge(
+        target_returns=raw_spread_returns,
+        factor_returns=factor_returns,
+        lookback=config.beta_lookback,
+        rebalance=config.hedge_rebalance,
+    )
+    hedged_factor_returns = factor_returns.mul(factor_betas, axis=1).sum(axis=1)
+    residual_returns = (
+        raw_spread_returns - hedge_intercept - hedged_factor_returns
+    ).fillna(0.0)
+    residual_returns.name = "residual_returns"
+
+    residual_level = residual_returns.cumsum()
+    residual_level.name = "basket_notional"
+
+    rolling_mean = residual_level.rolling(config.signal_lookback).mean()
+    rolling_std = residual_level.rolling(config.signal_lookback).std(ddof=0)
+    zscore = ((residual_level - rolling_mean) / rolling_std).replace(
+        [np.inf, -np.inf], np.nan
+    )
+    zscore.name = "spread_z"
+
+    raw_position = _signal_to_position(
+        zscore,
+        entry_z=config.entry_z,
+        exit_z=config.exit_z,
+        mode=mode,
+    )
+    raw_position = _apply_blackout(raw_position, blackout_mask)
+    raw_position = _apply_catalyst_alignment(
+        raw_position,
+        catalyst_signal=catalyst_signal,
+        mode=mode,
+        require_catalyst=require_catalyst,
+    )
+    regime_filters = _regime_filter_mask(
+        residual_returns=residual_returns,
+        factor_returns=factor_returns,
+        factor_betas=factor_betas,
+        config=config,
+    )
+    filtered_position = raw_position.where(regime_filters["regime_ok"], 0.0)
+    vol_scale = _vol_target_scale(
+        residual_returns,
+        target_vol=config.target_vol,
+        lookback=config.vol_lookback,
+        max_gross_leverage=config.max_gross_leverage,
+    )
+    position = (filtered_position * vol_scale).rename("position")
+
+    turnover = position.diff().abs().fillna(position.abs())
+    total_gross_exposure = 1.0 + factor_betas.abs().sum(axis=1)
+    basket_long = float(weight_vec.clip(lower=0).sum())
+    basket_short = float((-weight_vec.clip(upper=0)).sum())
+    factor_short_long_spread = factor_betas.clip(lower=0).sum(axis=1)
+    factor_short_short_spread = (-factor_betas.clip(upper=0)).sum(axis=1)
+    short_exposure = pd.Series(0.0, index=position.index, name="short_exposure")
+    short_exposure[position > 0] = basket_short + factor_short_long_spread[position > 0]
+    short_exposure[position < 0] = basket_long + factor_short_short_spread[position < 0]
+
+    transaction_cost = (
+        turnover * total_gross_exposure * (config.transaction_cost_bps / 10000.0)
+    )
+    borrow_cost = (
+        short_exposure * abs(position) * (config.borrow_cost_bps / 10000.0 / 252.0)
+    )
+    gross_returns = position * residual_returns
+    strategy_returns = (gross_returns - transaction_cost - borrow_cost).fillna(0.0)
+    strategy_returns.name = "portfolio_returns"
+
+    diagnostics = factor_betas.add_prefix("beta_")
+    diagnostics = pd.concat(
+        [
+            diagnostics,
+            factor_returns.rename(columns=lambda symbol: f"factor_ret_{symbol}"),
+            factor_returns.mul(-position, axis=0)
+            .mul(factor_betas, axis=1)
+            .rename(columns=lambda symbol: f"factor_contrib_{symbol}"),
+        ],
+        axis=1,
+    )
+    diagnostics["hedge_intercept"] = hedge_intercept
+    diagnostics["gross_spread_returns"] = gross_returns
+    diagnostics["transaction_cost"] = transaction_cost
+    diagnostics["borrow_cost"] = borrow_cost
+    diagnostics["gross_exposure"] = total_gross_exposure
+    diagnostics["short_exposure"] = short_exposure
+    diagnostics["vol_target_scale"] = vol_scale
+    diagnostics["raw_position"] = raw_position
+    if catalyst_signal is not None:
+        diagnostics["catalyst_signal"] = catalyst_signal.reindex(position.index).fillna(
+            0.0
+        )
+    diagnostics["filtered_position"] = filtered_position
+    diagnostics = pd.concat([diagnostics, regime_filters], axis=1)
+    if blackout_mask is not None:
+        diagnostics["event_blackout"] = (
+            blackout_mask.reindex(position.index).fillna(False).astype(int)
+        )
+    diagnostics["signal_mode"] = 1 if mode == "momentum" else -1
+
+    equity_curve = _recompute_equity(strategy_returns)
+    return residual_level, zscore, position, strategy_returns, equity_curve, diagnostics
+
+
+def compute_stats(
+    daily_returns: pd.Series,
+    equity_curve: pd.Series,
+    basket_notional: pd.Series | None = None,
+    zscore: pd.Series | None = None,
+    position: pd.Series | None = None,
+) -> pd.Series:
+    stats = {
+        "start": str(daily_returns.index.min().date()),
+        "end": str(daily_returns.index.max().date()),
+        "days": int(len(daily_returns)),
+        "total_return": float(equity_curve.iloc[-1] - 1.0),
+        "annual_return": float(annualized_return(daily_returns)),
+        "annual_vol": float(annualized_vol(daily_returns)),
+        "sharpe": float(sharpe_ratio(daily_returns)),
+        "sortino": float(sortino_ratio(daily_returns)),
+        "max_drawdown": float(max_drawdown(equity_curve)),
+        "calmar": float(calmar_ratio(daily_returns, equity_curve)),
+        "win_rate": float((daily_returns > 0).mean()),
+        "avg_daily_return": float(daily_returns.mean()),
+        "best_day": float(daily_returns.max()),
+        "worst_day": float(daily_returns.min()),
+        "skew": float(daily_returns.skew()),
+        "kurtosis": float(daily_returns.kurtosis()),
+    }
+
+    if basket_notional is not None and basket_notional.std(ddof=0) > 0:
+        centered = (basket_notional - basket_notional.mean()) / basket_notional.std(
+            ddof=0
+        )
+        stats["basket_mean"] = float(basket_notional.mean())
+        stats["basket_std"] = float(basket_notional.std(ddof=0))
+        stats["basket_last_zscore"] = float(centered.iloc[-1])
+
+    if zscore is not None:
+        valid_zscore = zscore.dropna()
+        if not valid_zscore.empty:
+            stats["spread_z_last"] = float(valid_zscore.iloc[-1])
+            stats["spread_z_abs_mean"] = float(valid_zscore.abs().mean())
+
+    if position is not None:
+        entries = int(((position != 0) & (position.shift(1).fillna(0) == 0)).sum())
+        exits = int(((position == 0) & (position.shift(1).fillna(0) != 0)).sum())
+        active_days = int((position != 0).sum())
+
+        trade_lengths: list[int] = []
+        current_length = 0
+        for current_position in position.fillna(0.0):
+            if current_position != 0:
+                current_length += 1
+            elif current_length > 0:
+                trade_lengths.append(current_length)
+                current_length = 0
+        if current_length > 0:
+            trade_lengths.append(current_length)
+
+        stats["entries"] = entries
+        stats["exits"] = exits
+        stats["active_days"] = active_days
+        stats["active_fraction"] = (
+            float(active_days / len(position)) if len(position) else np.nan
+        )
+        stats["avg_holding_days"] = (
+            float(np.mean(trade_lengths)) if trade_lengths else np.nan
+        )
+
+    return pd.Series(stats)
+
+
+def run_weighted_portfolio_backtest(
+    prices: pd.DataFrame,
+    weights: dict[str, float],
+    config: PortfolioConfig = PortfolioConfig(),
+    basket_label: str | None = None,
+) -> BacktestResult:
+    prices = prices.dropna()
+    if prices.empty:
+        raise RuntimeError(
+            "No overlapping price history found after filtering dates and dropping NaNs."
+        )
+
+    basket_notional = compute_basket_notional(prices, weights)
+    daily_returns, equity_curve = compute_portfolio_from_returns(
+        prices, weights, config.rebalance
+    )
+    contributions = _asset_contribution_frame(
+        prices=prices,
+        weights=weights,
+        exposure=pd.Series(1.0, index=prices.index, name="exposure"),
+    )
+    stats = compute_stats(daily_returns, equity_curve, basket_notional=basket_notional)
+    timeseries = pd.concat(
+        [prices, basket_notional, daily_returns, equity_curve, contributions], axis=1
+    )
+
+    return BacktestResult(
+        strategy="weighted_portfolio",
+        weights=weights,
+        prices=prices,
+        timeseries=timeseries,
+        stats=stats,
+        basket_label=basket_label,
+    )
+
+
+def run_mean_reversion_backtest(
+    prices: pd.DataFrame,
+    weights: dict[str, float],
+    config: MeanReversionConfig = MeanReversionConfig(),
+    basket_label: str | None = None,
+    blackout_mask: pd.Series | None = None,
+) -> BacktestResult:
+    prices = prices.dropna()
+    if prices.empty:
+        raise RuntimeError(
+            "No overlapping price history found after filtering dates and dropping NaNs."
+        )
+
+    spread, zscore, position, daily_returns, equity_curve = (
+        compute_mean_reversion_strategy(
+            prices=prices,
+            weights=weights,
+            config=config,
+            blackout_mask=blackout_mask,
+        )
+    )
+    stats = compute_stats(
+        daily_returns,
+        equity_curve,
+        basket_notional=spread,
+        zscore=zscore,
+        position=position,
+    )
+    contributions = _asset_contribution_frame(
+        prices=prices,
+        weights=weights,
+        exposure=position,
+    )
+    timeseries = pd.concat(
+        [prices, spread, zscore, position, daily_returns, equity_curve, contributions],
+        axis=1,
+    )
+
+    return BacktestResult(
+        strategy="mean_reversion",
+        weights=weights,
+        prices=prices,
+        timeseries=timeseries,
+        stats=stats,
+        basket_label=basket_label,
+    )
+
+
+def run_residual_backtest(
+    asset_prices: pd.DataFrame,
+    weights: dict[str, float],
+    factor_prices: pd.DataFrame,
+    config: ResidualStrategyConfig = ResidualStrategyConfig(),
+    basket_label: str | None = None,
+    blackout_mask: pd.Series | None = None,
+    catalyst_signal: pd.Series | None = None,
+    require_catalyst: bool = False,
+) -> BacktestResult:
+    asset_prices = asset_prices.dropna()
+    factor_prices = factor_prices.dropna()
+    if asset_prices.empty or factor_prices.empty:
+        raise RuntimeError(
+            "No overlapping asset/factor history found after filtering dates and dropping NaNs."
+        )
+
+    residual_level, zscore, position, daily_returns, equity_curve, diagnostics = (
+        compute_residual_mean_reversion_strategy(
+            asset_prices=asset_prices,
+            weights=weights,
+            factor_prices=factor_prices,
+            config=config,
+            blackout_mask=blackout_mask,
+            catalyst_signal=catalyst_signal,
+            require_catalyst=require_catalyst,
+            mode="mean_reversion",
+        )
+    )
+    aligned_prices = pd.concat([asset_prices, factor_prices], axis=1).dropna()
+    aligned_asset_prices = aligned_prices[list(asset_prices.columns)]
+    stats = compute_stats(
+        daily_returns,
+        equity_curve,
+        basket_notional=residual_level,
+        zscore=zscore,
+        position=position,
+    )
+    contributions = _asset_contribution_frame(
+        prices=aligned_asset_prices,
+        weights=weights,
+        exposure=position,
+    )
+    timeseries = pd.concat(
+        [
+            aligned_asset_prices,
+            residual_level,
+            zscore,
+            position,
+            daily_returns,
+            equity_curve,
+            contributions,
+            diagnostics,
+        ],
+        axis=1,
+    )
+
+    return BacktestResult(
+        strategy="factor_neutral_residual",
+        weights=weights,
+        prices=aligned_asset_prices,
+        timeseries=timeseries,
+        stats=stats,
+        basket_label=basket_label,
+    )
+
+
+def run_residual_momentum_backtest(
+    asset_prices: pd.DataFrame,
+    weights: dict[str, float],
+    factor_prices: pd.DataFrame,
+    config: ResidualStrategyConfig = ResidualStrategyConfig(),
+    basket_label: str | None = None,
+    blackout_mask: pd.Series | None = None,
+    catalyst_signal: pd.Series | None = None,
+    require_catalyst: bool = False,
+) -> BacktestResult:
+    asset_prices = asset_prices.dropna()
+    factor_prices = factor_prices.dropna()
+    if asset_prices.empty or factor_prices.empty:
+        raise RuntimeError(
+            "No overlapping asset/factor history found after filtering dates and dropping NaNs."
+        )
+
+    residual_level, zscore, position, daily_returns, equity_curve, diagnostics = (
+        compute_residual_mean_reversion_strategy(
+            asset_prices=asset_prices,
+            weights=weights,
+            factor_prices=factor_prices,
+            config=config,
+            blackout_mask=blackout_mask,
+            catalyst_signal=catalyst_signal,
+            require_catalyst=require_catalyst,
+            mode="momentum",
+        )
+    )
+    aligned_prices = pd.concat([asset_prices, factor_prices], axis=1).dropna()
+    aligned_asset_prices = aligned_prices[list(asset_prices.columns)]
+    stats = compute_stats(
+        daily_returns,
+        equity_curve,
+        basket_notional=residual_level,
+        zscore=zscore,
+        position=position,
+    )
+    contributions = _asset_contribution_frame(
+        prices=aligned_asset_prices,
+        weights=weights,
+        exposure=position,
+    )
+    timeseries = pd.concat(
+        [
+            aligned_asset_prices,
+            residual_level,
+            zscore,
+            position,
+            daily_returns,
+            equity_curve,
+            contributions,
+            diagnostics,
+        ],
+        axis=1,
+    )
+
+    return BacktestResult(
+        strategy="factor_neutral_residual_momentum",
+        weights=weights,
+        prices=aligned_asset_prices,
+        timeseries=timeseries,
+        stats=stats,
+        basket_label=basket_label,
+    )
+
+
+def slice_backtest_result(
+    result: BacktestResult,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> BacktestResult:
+    sliced = result.timeseries.loc[start:end].copy()
+    if sliced.empty:
+        raise RuntimeError("Requested slice produced no rows.")
+
+    sliced["portfolio_returns"] = sliced["portfolio_returns"].fillna(0.0)
+    sliced["equity_curve"] = _recompute_equity(sliced["portfolio_returns"])
+
+    basket_notional = (
+        sliced["basket_notional"] if "basket_notional" in sliced.columns else None
+    )
+    zscore = sliced["spread_z"] if "spread_z" in sliced.columns else None
+    position = sliced["position"] if "position" in sliced.columns else None
+    stats = compute_stats(
+        sliced["portfolio_returns"],
+        sliced["equity_curve"],
+        basket_notional=basket_notional,
+        zscore=zscore,
+        position=position,
+    )
+    prices = sliced[result.prices.columns.intersection(sliced.columns)].copy()
+    return BacktestResult(
+        strategy=result.strategy,
+        weights=result.weights,
+        prices=prices,
+        timeseries=sliced,
+        stats=stats,
+        basket_label=result.basket_label,
+    )
