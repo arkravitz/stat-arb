@@ -107,3 +107,110 @@ def _normalize_price_frame(df: pd.DataFrame, symbol: str) -> pd.Series:
     return prices
 
 
+def extract_symbol_series_from_wide_cache(df: pd.DataFrame, symbol: str) -> pd.Series:
+    symbol = symbol.upper()
+
+    if isinstance(df.columns, pd.MultiIndex):
+        for symbol_level in range(df.columns.nlevels):
+            values = [str(value).upper() for value in df.columns.get_level_values(symbol_level)]
+            if symbol not in values:
+                continue
+
+            field_levels = [idx for idx in range(df.columns.nlevels) if idx != symbol_level]
+            close_candidates = ["ADJ CLOSE", "ADJ_CLOSE", "ADJCLOSE", "CLOSE"]
+            for field_level in field_levels:
+                field_values = [str(value).upper() for value in df.columns.get_level_values(field_level)]
+                for close_name in close_candidates:
+                    if close_name not in field_values:
+                        continue
+                    symbol_values = pd.Index(
+                        [str(value).upper() for value in df.columns.get_level_values(symbol_level)]
+                    )
+                    field_values_index = pd.Index(
+                        [str(value).upper() for value in df.columns.get_level_values(field_level)]
+                    )
+                    mask = (symbol_values == symbol) & (field_values_index == close_name)
+                    subset = df.loc[:, mask]
+                    if subset.shape[1] >= 1:
+                        series = pd.to_numeric(subset.iloc[:, 0], errors="coerce").dropna()
+                        series = series[~series.index.duplicated(keep="last")].sort_index()
+                        series.name = symbol
+                        return series
+
+            subset = df.xs(symbol, axis=1, level=symbol_level, drop_level=True)
+            if isinstance(subset, pd.Series):
+                subset = subset.to_frame(name="Close")
+            else:
+                subset = subset.copy()
+            subset.columns = [str(col) for col in subset.columns]
+            return _normalize_price_frame(subset.reset_index(), symbol)
+
+        raise ValueError(f"Symbol {symbol} not found in MultiIndex columns.")
+
+    upper_cols = {str(col).upper(): col for col in df.columns}
+    for candidate in [
+        symbol,
+        f"ADJ CLOSE_{symbol}",
+        f"ADJ_CLOSE_{symbol}",
+        f"ADJCLOSE_{symbol}",
+        f"CLOSE_{symbol}",
+        f"{symbol}_ADJ CLOSE",
+        f"{symbol}_ADJ_CLOSE",
+        f"{symbol}_ADJCLOSE",
+        f"{symbol}_CLOSE",
+    ]:
+        if candidate in upper_cols:
+            subset = pd.DataFrame({symbol: df[upper_cols[candidate]]})
+            subset.index = df.index
+            return _normalize_price_frame(subset.reset_index(), symbol)
+
+    cols_upper = {str(col).upper(): col for col in df.columns}
+    sym_col = next((cols_upper[name] for name in ["SYMBOL", "TICKER", "ASSET"] if name in cols_upper), None)
+    if sym_col is not None:
+        subset = df[df[sym_col].astype(str).str.upper() == symbol].copy()
+        if not subset.empty:
+            return _normalize_price_frame(subset, symbol)
+
+    raise ValueError(
+        f"Could not extract {symbol} from shared cache. Columns look like: {list(df.columns)[:12]}"
+    )
+
+
+def _sample_parquet_paths(cache_dirs: Iterable[Path], limit: int = 10) -> list[str]:
+    sample: list[str] = []
+    for root in cache_dirs:
+        if not root.exists():
+            continue
+        for path in root.rglob("*.parquet"):
+            sample.append(str(path))
+            if len(sample) >= limit:
+                return sample
+    return sample
+
+
+def load_price_series(symbol: str, cache_dirs: Sequence[Path]) -> pd.Series:
+    try:
+        path = find_cache_file(symbol, cache_dirs)
+        if path.suffix.lower() == ".csv":
+            df = pd.read_csv(path)
+        elif path.suffix.lower() == ".parquet":
+            df = pd.read_parquet(path)
+        else:
+            raise ValueError(f"Unsupported cache file type: {path}")
+        return _normalize_price_frame(df, symbol)
+    except FileNotFoundError as exc:
+        shared_cache = find_single_parquet_cache(cache_dirs)
+        if shared_cache is None:
+            sample = _sample_parquet_paths(cache_dirs)
+            raise FileNotFoundError(
+                f"No per-symbol cache file found for {symbol}, and no unique shared parquet cache found. "
+                f"Saw parquet files: {sample}"
+            ) from exc
+        df = pd.read_parquet(shared_cache)
+        return extract_symbol_series_from_wide_cache(df, symbol)
+
+
+def load_price_panel(symbols: Sequence[str], cache_dirs: Sequence[Path]) -> pd.DataFrame:
+    series = [load_price_series(symbol, cache_dirs) for symbol in symbols]
+    prices = pd.concat(series, axis=1).sort_index()
+    return prices.dropna(how="all")
