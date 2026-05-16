@@ -198,3 +198,199 @@ def load_candidate_baskets(csv_path: Path) -> list[CandidateBasket]:
     return candidates
 
 
+def run_walk_forward_selection(
+    prices: pd.DataFrame,
+    candidates: list[CandidateBasket],
+    config: WalkForwardConfig,
+    runner: Callable[[pd.DataFrame, CandidateBasket], BacktestResult],
+    warmup_bars: int,
+) -> WalkForwardResult:
+    dates = prices.index
+    required = config.train_days + config.validate_days + config.test_days
+    if len(dates) < required:
+        raise RuntimeError(
+            f"Need at least {required} rows for walk-forward evaluation, found {len(dates)}."
+        )
+
+    oos_returns: list[pd.Series] = []
+    oos_selected_counts: list[pd.Series] = []
+    oos_capital_used: list[pd.Series] = []
+    fold_rows: list[dict[str, object]] = []
+
+    max_start = len(dates) - required
+    for fold_number, fold_start in enumerate(
+        range(0, max_start + 1, config.test_days), start=1
+    ):
+        train_start_idx = fold_start
+        train_end_idx = fold_start + config.train_days - 1
+        validate_start_idx = train_end_idx + 1
+        validate_end_idx = validate_start_idx + config.validate_days - 1
+        test_start_idx = validate_end_idx + 1
+        test_end_idx = test_start_idx + config.test_days - 1
+
+        warmup_start_idx = max(0, train_start_idx - warmup_bars)
+        history = prices.iloc[warmup_start_idx : test_end_idx + 1]
+
+        train_start = dates[train_start_idx]
+        train_end = dates[train_end_idx]
+        validate_start = dates[validate_start_idx]
+        validate_end = dates[validate_end_idx]
+        test_start = dates[test_start_idx]
+        test_end = dates[test_end_idx]
+
+        scored: list[
+            tuple[
+                float, CandidateBasket, BacktestResult, BacktestResult, BacktestResult
+            ]
+        ] = []
+        for candidate in candidates:
+            try:
+                result = runner(history, candidate)
+                train_result = slice_backtest_result(result, train_start, train_end)
+                validation_result = slice_backtest_result(
+                    result, validate_start, validate_end
+                )
+                test_result = slice_backtest_result(result, test_start, test_end)
+            except Exception:
+                continue
+            if train_result.stats["sharpe"] < config.min_train_sharpe:
+                continue
+            if validation_result.stats["sharpe"] < config.min_validation_sharpe:
+                continue
+            if (
+                validation_result.stats.get("entries", 0)
+                < config.min_validation_entries
+            ):
+                continue
+            selection_score = float(validation_result.stats["sharpe"]) - (
+                config.stability_penalty
+                * abs(
+                    float(train_result.stats["sharpe"])
+                    - float(validation_result.stats["sharpe"])
+                )
+            )
+            scored.append(
+                (
+                    selection_score,
+                    candidate,
+                    train_result,
+                    validation_result,
+                    test_result,
+                )
+            )
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        selected = _select_diverse_candidates(scored, config)
+        if selected:
+            weights = _portfolio_weights(selected, config)
+            test_returns = []
+            for _, candidate, _, _, test_result in selected:
+                series = test_result.timeseries["portfolio_returns"].rename(
+                    candidate.trade
+                )
+                test_returns.append(series)
+            test_panel = pd.concat(test_returns, axis=1).fillna(0.0)
+            fold_returns = test_panel.mul(
+                weights.reindex(test_panel.columns), axis=1
+            ).sum(axis=1)
+            selected_count = pd.Series(
+                len(selected), index=fold_returns.index, name="selected_count"
+            )
+            capital_used = pd.Series(
+                float(weights.abs().sum()),
+                index=fold_returns.index,
+                name="capital_used",
+            )
+        else:
+            fold_returns = pd.Series(
+                0.0,
+                index=prices.loc[test_start:test_end].index,
+                name="portfolio_returns",
+            )
+            selected_count = pd.Series(
+                0.0, index=fold_returns.index, name="selected_count"
+            )
+            capital_used = pd.Series(0.0, index=fold_returns.index, name="capital_used")
+
+        fold_returns.name = "portfolio_returns"
+        oos_returns.append(fold_returns)
+        oos_selected_counts.append(selected_count)
+        oos_capital_used.append(capital_used)
+
+        if selected:
+            for rank, (
+                selection_score,
+                candidate,
+                train_result,
+                validation_result,
+                test_result,
+            ) in enumerate(selected, start=1):
+                portfolio_weight = float(weights.get(candidate.trade, 0.0))
+                fold_rows.append(
+                    {
+                        "fold": fold_number,
+                        "rank": rank,
+                        "trade": candidate.trade,
+                        "archetype": trade_archetype(candidate.weights.keys()),
+                        "train_start": str(train_start.date()),
+                        "train_end": str(train_end.date()),
+                        "validate_start": str(validate_start.date()),
+                        "validate_end": str(validate_end.date()),
+                        "test_start": str(test_start.date()),
+                        "test_end": str(test_end.date()),
+                        "train_sharpe": float(train_result.stats["sharpe"]),
+                        "validation_sharpe": float(validation_result.stats["sharpe"]),
+                        "test_sharpe": float(test_result.stats["sharpe"]),
+                        "selection_score": float(selection_score),
+                        "portfolio_weight": portfolio_weight,
+                        "validation_entries": int(
+                            validation_result.stats.get("entries", 0)
+                        ),
+                        "test_entries": int(test_result.stats.get("entries", 0)),
+                    }
+                )
+        else:
+            fold_rows.append(
+                {
+                    "fold": fold_number,
+                    "rank": 0,
+                    "trade": "",
+                    "archetype": "",
+                    "train_start": str(train_start.date()),
+                    "train_end": str(train_end.date()),
+                    "validate_start": str(validate_start.date()),
+                    "validate_end": str(validate_end.date()),
+                    "test_start": str(test_start.date()),
+                    "test_end": str(test_end.date()),
+                    "train_sharpe": float("nan"),
+                    "validation_sharpe": float("nan"),
+                    "test_sharpe": float("nan"),
+                    "selection_score": float("nan"),
+                    "portfolio_weight": 0.0,
+                    "validation_entries": 0,
+                    "test_entries": 0,
+                }
+            )
+
+    combined_returns = pd.concat(oos_returns).sort_index()
+    combined_returns = combined_returns[
+        ~combined_returns.index.duplicated(keep="first")
+    ]
+    combined_returns.name = "portfolio_returns"
+    combined_equity = (1.0 + combined_returns).cumprod()
+    combined_equity.name = "equity_curve"
+
+    selected_count = pd.concat(oos_selected_counts).sort_index()
+    selected_count = selected_count[~selected_count.index.duplicated(keep="first")]
+    capital_used = pd.concat(oos_capital_used).sort_index()
+    capital_used = capital_used[~capital_used.index.duplicated(keep="first")]
+
+    timeseries = pd.concat(
+        [combined_returns, combined_equity, selected_count, capital_used], axis=1
+    )
+    stats = compute_stats(timeseries["portfolio_returns"], timeseries["equity_curve"])
+    return WalkForwardResult(
+        timeseries=timeseries,
+        stats=stats,
+        fold_summary=pd.DataFrame(fold_rows),
+    )
